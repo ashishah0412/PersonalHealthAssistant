@@ -1,0 +1,8 @@
+# Python virtual environment
+.venv/
+
+# Other common exclusions for Python projects (optional)
+__pycache__/
+*.pyc
+*.log
+.env

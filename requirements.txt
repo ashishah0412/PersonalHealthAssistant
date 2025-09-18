@@ -1,0 +1,11 @@
+streamlit>=1.20
+streamlit-option-menu
+pandas
+numpy
+plotly
+pillow
+python-multipart
+pydantic
+requests
+fastapi
+uvicorn[standard]

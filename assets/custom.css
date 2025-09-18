@@ -1,0 +1,29 @@
+/* Sidebar Background */
+[data-testid="stSidebar"] {
+    background-color: #f8fbff;
+}
+
+/* Option Menu Styling */
+div[data-testid="stSidebarNav"] li a {
+    font-size: 16px;
+    font-weight: 500;
+    color: #333 !important;
+    border-radius: 10px;
+}
+
+div[data-testid="stSidebarNav"] li a:hover {
+    background-color: #e6f0ff;
+    color: #0056b3 !important;
+    font-weight: bold;
+}
+
+div[data-testid="stSidebarNav"] li a.active {
+    background-color: #0056b3 !important;
+    color: white !important;
+    font-weight: bold;
+}
+
+/* Global App Font */
+html, body, [class*="css"] {
+    font-family: "Segoe UI", "Roboto", "Arial", sans-serif;
+}
