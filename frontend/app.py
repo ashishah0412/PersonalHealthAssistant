@@ -28,7 +28,7 @@ def backend_get(path, params=None):
 
 def backend_post(path, json=None, files=None, data=None):
     try:
-        resp = requests.post(BACKEND_BASE + path, json=json, files=files, data=data, timeout=8)
+        resp = requests.post(BACKEND_BASE + path, json=json, files=files, data=data, timeout=30)
         resp.raise_for_status()
         return resp.json()
     except Exception as e:

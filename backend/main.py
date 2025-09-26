@@ -11,6 +11,18 @@ from sqlalchemy import create_engine, Column, Integer, String, Float, Date, Text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship, Session
 
+import pytesseract
+from PIL import Image
+import requests
+import json
+
+ # Your Gemini API key. Replace 'YOUR_API_KEY' with your actual key.
+# This key allows your program to communicate with the Gemini API.
+API_KEY = ""
+
+# The URL for the Gemini API. We are using the gemini-2.5-flash-preview-05-20 model.
+API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={API_KEY}"
+
 # ----------------------------
 # Setup
 # ----------------------------
@@ -70,6 +82,8 @@ class Report(Base):
     file_path = Column(String)
     parsed = Column(Text)  # store JSON string
     notes = Column(Text)
+    extracted_text = Column(Text, nullable=True)  # raw OCR text
+    report_json = Column(Text, nullable=True)     # structured data from LLM
 
     member = relationship("FamilyMember", back_populates="reports")
 
@@ -137,6 +151,10 @@ class ReportOut(BaseModel):
     parsed: Optional[dict]
     notes: Optional[str]
     file_path: Optional[str]
+    class Config:
+        orm_mode = True
+
+
 
 # ----------------------------
 # Dependency
@@ -237,24 +255,51 @@ async def upload_report(
     file: UploadFile = File(None),
     db: Session = Depends(get_db)
 ):
-    new_report = Report(
-        member_id=member_id,
-        date=report_date,
-        type=report_type,
-        lab=lab_name,
-        doctor=doctor,
-        file_path=None
-    )
+    if not file:
+        raise HTTPException(status_code=400, detail="No file uploaded")
+
     if file:
         filename = f"{uuid.uuid4().hex}_{file.filename}"
         file_path = os.path.abspath(os.path.join(UPLOAD_DIR, filename))
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-        new_report.file_path = file_path
+        # 2. Run OCR
+        print("Starting OCR...")
+        extracted_text = extract_text_from_file(file_path)
+        print(f"OCR Extracted Text: {extracted_text[:100]}...")  # Print first 100 chars
+        print("OCR done. Starting LLM...")
+
+        # 3. Run LLM parsing
+        parsed_json = None
+        if extracted_text and not extracted_text.startswith("Error"):
+            parsed_json = generate_report_json(extracted_text)    
+        new_report = Report(
+        member_id=member_id,
+        date=report_date,
+        type=report_type,
+        lab=lab_name,
+        doctor=doctor,
+        file_path=file_path,
+        extracted_text=extracted_text,  # <-- Save OCR result here
+        report_json=json.dumps(parsed_json) if parsed_json else None
+        )
+        #new_report.file_path = file_path
+
     db.add(new_report)
     db.commit()
     db.refresh(new_report)
-    return new_report
+    return ReportOut(
+        id=new_report.id,
+        member_id=new_report.member_id,
+        date=new_report.date,
+        type=new_report.type,
+        lab=new_report.lab,
+        doctor=new_report.doctor,
+        parsed=json.loads(new_report.report_json) if new_report.report_json else None,
+        notes=new_report.notes,
+        file_path=new_report.file_path
+    )
+    #return new_report
 
 @app.get("/reports", response_model=List[ReportOut])
 def list_reports(member_id: Optional[int] = None, db: Session = Depends(get_db)):
@@ -318,3 +363,104 @@ def predict_risk(member_id: int, db: Session = Depends(get_db)):
         age = 40
     score = min(95, 30 + (age // 2))
     return {"member_id": member_id, "risk_score": score, "message": "Mock risk score (0-100)"}
+
+
+
+
+def extract_text_from_file(file_path: str) -> str:
+# do OCR (pytesseract, textract, AWS Textract, etc.)        
+    """
+    Extracts text from an image file using the Tesseract OCR engine.
+
+    Args:
+        image_path (str): The path to the image file.
+
+    Returns:
+        str: The extracted text, or an error message if the operation fails.
+    """
+    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'  # Update this path if necessary
+    
+
+    if not os.path.exists(file_path):
+        return f"Error: Image file not found at '{file_path}'."
+
+    try:
+        # Open the image using Pillow (PIL)
+        image = Image.open(file_path)
+
+        # Use pytesseract to perform OCR on the image.
+        # The image_to_string() function will return the recognized text.
+        text = pytesseract.image_to_string(image)
+
+        return text.strip()  # .strip() removes leading/trailing whitespace
+
+    except pytesseract.TesseractNotFoundError:
+        return "Error: Tesseract is not installed or not in your PATH. Please install it."
+    except Exception as e:
+        return f"An unexpected error occurred: {e}"
+
+
+
+def generate_report_json(report_text: str) -> dict:   
+
+    """
+    Sends the lab report text to the Gemini API for parsing and JSON generation.
+    The API is instructed to create the JSON structure itself.
+
+    Args:
+        report_text (str): The raw text of the lab report.
+
+    Returns:
+        dict: A dictionary representing the parsed JSON data, or None on failure.
+    """
+    
+    # The system instruction now contains a detailed description of the JSON structure.
+    # This is how we guide the model to produce the desired output without a schema.
+    system_instruction = {
+        "parts": [{
+            "text": """
+            You are an expert at parsing medical lab reports and formatting the data into JSON.
+            Your task is to extract all the key information from the provided lab report text and format it into a single JSON object.
+            
+            Strictly follow these rules:
+            1. The final output MUST be a single JSON object.
+            2. The JSON object MUST have the following top-level keys:
+            - "reportDetails": An object containing details like "regNo", "registeredOn", "collectedOn", "receivedOn", and "reportedOn".
+            - "patientDetails": An object with "name", "age" (as a number), and "sex".
+            - "labDetails": An object with "labName", "labIncharge" (an object with name and qualification), and "pathologist" (an object with name and qualification).
+            - "testResults": An array of objects. Each object in this array must contain "testName", "value", "unit", and "referenceRange".
+            - "clinicalNotes": A string containing the clinical notes.
+            - "abnormalParametersNotes": A string for notes on abnormal parameters.
+            3. Extract all fields and populate the JSON object.
+            4. For test results, parse each line in the "HAEMATOLOGY" section into a separate object within the "testResults" array.
+            5. Clean the data. For example, remove extra words like "Lo" and "H_" from the value field and place them in the test name, if necessary.
+            """
+        }]
+    }
+
+    # The payload for the API request. Note the absence of the 'responseSchema'.
+    payload = {
+        "contents": [{"parts": [{"text": report_text}]}],
+        "systemInstruction": system_instruction,
+        "generationConfig": {
+            "responseMimeType": "application/json",
+        }
+    }
+
+    try:
+        # Make the API request
+        response = requests.post(API_URL, json=payload, timeout=30)
+        response.raise_for_status()  # Raise an exception for bad status codes (4xx or 5xx)
+
+        # Parse the JSON response and return the content
+        response_data = response.json()
+        raw_json_string = response_data['candidates'][0]['content']['parts'][0]['text']
+        return json.loads(raw_json_string)
+    except requests.exceptions.RequestException as e:
+        print(f"API request failed: {e}")
+    except (KeyError, IndexError, json.JSONDecodeError) as e:
+        print(f"Error parsing API response: {e}")
+        print("Raw response:", response.text)
+    
+    return None
+
